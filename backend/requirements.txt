@@ -1,0 +1,11 @@
+fastapi==0.111.0
+uvicorn==0.29.0
+python-multipart==0.0.9
+pandas
+numpy
+scikit-learn
+fairlearn
+supabase
+python-dotenv
+openpyxl
+xlrd
