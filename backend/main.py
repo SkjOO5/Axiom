@@ -1,5 +1,6 @@
 import io
 import os
+import sys
 import json
 import time
 import asyncio
@@ -11,6 +12,10 @@ import secrets
 import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Literal, Optional
+
+# ── Ensure all local modules resolve relative to this file ──────────────────
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
@@ -19,17 +24,54 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, Field
-from bias_detector import BiasDetector
-from bias_mitigator import BiasMitigator
-from data_inspector import DataInspector
-from database import (
-    create_session, save_bias_audit, save_mitigation_result, update_session_status,
-    supabase
-)
-from utils import detect_sensitive_columns, encode_categorical
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
+
+# Local modules — wrapped so startup errors are visible in logs
+try:
+    from bias_detector import BiasDetector
+    print("[OK] bias_detector imported")
+except Exception as e:
+    print(f"[WARN] bias_detector import failed: {e}")
+    BiasDetector = None
+
+try:
+    from bias_mitigator import BiasMitigator
+    print("[OK] bias_mitigator imported")
+except Exception as e:
+    print(f"[WARN] bias_mitigator import failed: {e}")
+    BiasMitigator = None
+
+try:
+    from data_inspector import DataInspector
+    print("[OK] data_inspector imported")
+except Exception as e:
+    print(f"[WARN] data_inspector import failed: {e}")
+    DataInspector = None
+
+try:
+    from database import (
+        create_session, save_bias_audit, save_mitigation_result, update_session_status,
+        supabase
+    )
+    print("[OK] database imported")
+except Exception as e:
+    print(f"[WARN] database import failed: {e}")
+    create_session = save_bias_audit = save_mitigation_result = update_session_status = supabase = None
+
+try:
+    from utils import detect_sensitive_columns, encode_categorical
+    print("[OK] utils imported")
+except Exception as e:
+    print(f"[WARN] utils import failed: {e}")
+    detect_sensitive_columns = encode_categorical = None
+
+try:
+    from sklearn.model_selection import train_test_split
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.metrics import accuracy_score
+    print("[OK] sklearn imported")
+except Exception as e:
+    print(f"[WARN] sklearn import failed: {e}")
+    train_test_split = RandomForestClassifier = accuracy_score = None
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -144,8 +186,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from api.chat_routes import router as chat_router
-app.include_router(chat_router)
+try:
+    from api.chat_routes import router as chat_router
+    app.include_router(chat_router)
+    print("[OK] chat routes included")
+except Exception as e:
+    print(f"[WARN] chat routes import failed: {e}")
 
 
 
