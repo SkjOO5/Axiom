@@ -20,13 +20,10 @@ export async function sendChatMessage(payload: ChatApiRequest): Promise<ChatApiR
 
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const message =
-        typeof data?.detail === "string"
-          ? data.detail
-          : typeof data?.error === "string"
-            ? data.error
-            : "I'm having trouble connecting right now. Please try again in a moment.";
-      throw new Error(message);
+      if (response.status === 404) throw new Error('Chat service not found. Please check if the server is running.');
+      if (response.status === 500) throw new Error('Server error. Please try again.');
+      if (response.status === 429) throw new Error('Too many requests. Please wait a moment.');
+      throw new Error(data.detail || data.error || `Server error (${response.status})`);
     }
 
     const text =
@@ -41,6 +38,9 @@ export async function sendChatMessage(payload: ChatApiRequest): Promise<ChatApiR
       timestamp: typeof data?.timestamp === "string" ? data.timestamp : new Date().toISOString(),
     };
   } catch (error) {
+    if (error instanceof TypeError && error.message === 'Failed to fetch') {
+      throw new Error('Cannot connect to the server. Please ensure the backend is running on port 8000.');
+    }
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error("Request timed out after 30 seconds. Please try again. 🔄");
     }

@@ -139,6 +139,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from api.chat_routes import router as chat_router
+app.include_router(chat_router)
+
+
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -959,122 +963,7 @@ async def run_mitigation(strategy: str = Form(...), sensitive_col: str = Form(..
         return {"error": str(e), "trace": traceback.format_exc()}
 
 
-@app.post("/api/chat")
-async def chat_with_axiom_ai(payload: ChatRequest, request: Request):
-    client_id = request.client.host if request.client else "unknown"
-    now = time.time()
-    recent = [ts for ts in CHAT_RATE_LIMIT.get(client_id, []) if now - ts < 60]
-    if len(recent) >= 30:
-        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait a moment and try again.")
-    recent.append(now)
-    CHAT_RATE_LIMIT[client_id] = recent
 
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=503, detail="Chatbot is currently unavailable. Please configure the Gemini API key.")
-
-    try:
-        import google.generativeai as genai
-    except Exception:
-        raise HTTPException(
-            status_code=500,
-            detail="Gemini SDK is not installed. Add 'google-generativeai' to backend dependencies.",
-        )
-
-    try:
-        genai.configure(api_key=api_key)
-        configured_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        model_candidates = [
-            configured_model,
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
-        ]
-        # Keep order while removing duplicates.
-        model_candidates = list(dict.fromkeys(model_candidates))
-
-        history = payload.conversationHistory[-20:]
-        context_payload = payload.analysisContext.model_dump() if payload.analysisContext else None
-        context_json = json.dumps(context_payload, ensure_ascii=False, indent=2)
-
-        gemini_contents = [
-            {
-                "role": "user",
-                "parts": [
-                    "Current AXiOM analysis context (JSON). Use it when relevant and say when context is missing:\n"
-                    + context_json
-                ],
-            }
-        ]
-
-        for turn in history:
-            role = "model" if turn.role == "assistant" else "user"
-            gemini_contents.append({"role": role, "parts": [turn.content]})
-
-        gemini_contents.append({"role": "user", "parts": [payload.message]})
-
-        response = None
-        last_error = None
-        for candidate in model_candidates:
-            try:
-                model = genai.GenerativeModel(
-                    model_name=candidate,
-                    generation_config={
-                        "temperature": 0.7,
-                        "top_p": 0.95,
-                        "top_k": 40,
-                        "max_output_tokens": 1024,
-                    },
-                    safety_settings=[
-                        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-                    ],
-                    system_instruction=CHAT_SYSTEM_PROMPT,
-                )
-                response = await asyncio.wait_for(
-                    asyncio.to_thread(model.generate_content, gemini_contents),
-                    timeout=30,
-                )
-                break
-            except Exception as candidate_error:
-                last_error = candidate_error
-                err_text = str(candidate_error).lower()
-                # Retry only for unsupported/missing model cases; otherwise fail fast.
-                if ("not found" in err_text) or ("not supported" in err_text):
-                    continue
-                raise
-
-        if response is None:
-            raise RuntimeError(f"No compatible Gemini model available. Last error: {last_error}")
-
-        reply = getattr(response, "text", None)
-        if not reply:
-            reply = "I could not generate a response right now. Please try rephrasing your question."
-
-        return {
-            "response": reply,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    except TimeoutError:
-        raise HTTPException(status_code=504, detail="Request timed out after 30 seconds. Please try again.")
-    except HTTPException:
-        raise
-    except Exception as e:
-        err_text = str(e)
-        err_lower = err_text.lower()
-        if "quota" in err_lower or "rate limit" in err_lower or "429" in err_lower:
-            raise HTTPException(
-                status_code=429,
-                detail="Gemini API quota/rate limit exceeded for this key. Please check billing/quota and try again.",
-            )
-        if "api key" in err_lower or "permission" in err_lower or "unauthorized" in err_lower or "403" in err_lower:
-            raise HTTPException(
-                status_code=503,
-                detail="Gemini API access failed for the configured key. Verify key validity and project permissions.",
-            )
-        raise HTTPException(status_code=500, detail=f"Gemini request failed: {err_text}")
 
 if __name__ == "__main__":
     import uvicorn

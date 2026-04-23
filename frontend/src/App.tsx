@@ -6,7 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider } from "./contexts/AuthContext";
 import { lazy, Suspense } from "react";
 import ErrorBoundary from "./components/ErrorBoundary";
-import AxiomAiChatbot from "./components/AxiomAiChatbot";
+import ChatWidget from "./components/chatbot/ChatWidget";
 
 // Eagerly load critical auth pages for instant response
 import Index from "./pages/Index.tsx";
@@ -64,7 +64,7 @@ const App = () => (
                 <Route path="*" element={<NotFound />} />
               </Routes>
             </Suspense>
-            <AxiomAiChatbot />
+            <ChatWidget />
           </BrowserRouter>
         </TooltipProvider>
       </AuthProvider>
