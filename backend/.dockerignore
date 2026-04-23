@@ -1,0 +1,36 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pycache
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# Secrets — never copy into Docker image
+.env
+.env.*
+*.env
+
+# Development/test files
+*.log
+*.tmp
+test_*.py
+debug_*.py
+verify_*.py
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
