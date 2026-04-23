@@ -1,6 +1,7 @@
 # database.py
 import os
 import json
+import logging
 from datetime import datetime
 try:
     from dotenv import load_dotenv
@@ -29,7 +30,7 @@ try:
     supabase = get_supabase_client()
 except Exception as e:
     supabase = None
-    print(f"Warning: Supabase disabled - {e}")
+    logging.warning("Supabase disabled - %s", e)
 
 
 # ============ ANALYSIS SESSIONS ============

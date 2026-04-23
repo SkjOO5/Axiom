@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Menu, X, LogOut, User, ChevronDown, Settings } from 'lucide-react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 
 const links = ['Home', 'About', 'Problem', 'Solution', 'Features', 'Contact'];
@@ -11,7 +11,10 @@ export default function Navbar() {
   const [open, setOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const { user, logout } = useAuth();
+  const location = useLocation();
   const navigate = useNavigate();
+  const isLandingPage = location.pathname === '/';
+  const visibleLinks = isLandingPage ? links : ['Home'];
 
   const handleLogout = async () => {
     await logout();
@@ -51,7 +54,7 @@ export default function Navbar() {
           </Link>
 
           <div className="hidden md:flex items-center gap-8">
-            {links.map((l) => (
+            {visibleLinks.map((l) => (
               <button key={l} onClick={() => scrollTo(l)} className="nav-link">
                 {l}
               </button>
@@ -165,7 +168,7 @@ export default function Navbar() {
             transition={{ duration: 0.3 }}
             className="fixed inset-0 z-40 bg-background/95 backdrop-blur-2xl flex flex-col items-center justify-center gap-8"
           >
-            {links.map((l, i) => (
+            {visibleLinks.map((l, i) => (
               <motion.button
                 key={l}
                 initial={{ opacity: 0, y: 20 }}
@@ -181,7 +184,7 @@ export default function Navbar() {
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: links.length * 0.08 + 0.1, duration: 0.4 }}
+              transition={{ delay: visibleLinks.length * 0.08 + 0.1, duration: 0.4 }}
               className="flex flex-col items-center gap-3 mt-4"
             >
               {user ? (

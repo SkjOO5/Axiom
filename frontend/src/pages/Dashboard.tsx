@@ -1,8 +1,47 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, PieChart, Pie, Cell, Tooltip as RechartsTooltip, Legend, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts';
-import { ShieldAlert, CheckCircle, Info, FileText, Scale, Activity, Gavel, FileCheck, BarChart2, Download, Printer, Share2, RefreshCw } from 'lucide-react';
+import { ShieldAlert, CheckCircle, Info, FileText, Scale, Activity, Gavel, FileCheck, BarChart2, Download, Printer, Share2, RefreshCw, Upload, AlertTriangle } from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
+import { motion, AnimatePresence } from 'framer-motion';
+import { apiUrl } from '@/services/api';
+
+function CustomCursor() {
+  const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 });
+  const [isHovering, setIsHovering] = useState(false);
+
+  useEffect(() => {
+    const updateMousePosition = (e: MouseEvent) => {
+      setMousePosition({ x: e.clientX, y: e.clientY });
+      const target = e.target as HTMLElement;
+      if (target.closest('button, a, input, select, label')) {
+        setIsHovering(true);
+      } else {
+        setIsHovering(false);
+      }
+    };
+    
+    window.addEventListener('mousemove', updateMousePosition);
+    return () => window.removeEventListener('mousemove', updateMousePosition);
+  }, []);
+
+  return (
+    <motion.div
+      className="fixed top-0 left-0 w-6 h-6 rounded-full mix-blend-difference pointer-events-none z-[9999] flex items-center justify-center"
+      animate={{
+        x: mousePosition.x - 12,
+        y: mousePosition.y - 12,
+        scale: isHovering ? 1.5 : 1,
+      }}
+      transition={{ type: 'spring', stiffness: 500, damping: 28, mass: 0.5 }}
+    >
+      <div className={`w-2 h-2 rounded-full ${isHovering ? 'bg-primary' : 'bg-white'}`} style={{ boxShadow: isHovering ? '0 0 10px var(--primary)' : 'none' }} />
+    </motion.div>
+  );
+}
+
 
 export default function Dashboard() {
   const [file, setFile] = useState<File | null>(null);
@@ -24,14 +63,126 @@ export default function Dashboard() {
   
   const [analysisStep, setAnalysisStep] = useState(0);
 
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [viewingRecordName, setViewingRecordName] = useState('');
+  const [viewingRecordDate, setViewingRecordDate] = useState('');
+
+  useEffect(() => {
+    if (location.state?.viewRecordId) {
+      const historyStr = localStorage.getItem('axiom_analysis_history');
+      if (historyStr) {
+        const history = JSON.parse(historyStr);
+        const record = history.find((r: any) => r.id === location.state.viewRecordId);
+        if (record) {
+          if (record.analysisType === 'Document Analysis') {
+            setDocResult(record.fullResults);
+          } else {
+            setAuditResult(record.fullResults);
+          }
+          setViewingRecordName(record.fileName);
+          setViewingRecordDate(new Date(record.timestamp).toLocaleDateString());
+          setFile({ name: record.fileName } as any);
+        } else {
+          toast.error("This analysis record could not be found. It may have been deleted. Please run a new analysis.");
+        }
+      }
+      navigate('/dashboard', { replace: true, state: {} });
+    }
+  }, [location.state, navigate]);
+
+  const saveAnalysisRecord = (type: "Structured Data Analysis" | "Document Analysis", payload: any) => {
+    try {
+      const historyStr = localStorage.getItem('axiom_analysis_history');
+      let history = historyStr ? JSON.parse(historyStr) : [];
+      
+      let overallFairnessScore = 0;
+      let riskLevel = "Medium";
+      let verdict = "Potentially Biased";
+      let totalIssuesFound = 0;
+      let criticalIssues = 0;
+      let resultsSummary = "";
+
+      if (type === "Structured Data Analysis") {
+        const keys = Object.keys(payload.audits || {});
+        if (keys.length > 0) {
+          const firstAudit = payload.audits[keys[0]];
+          overallFairnessScore = firstAudit?.overall_fairness_score || 0;
+          if (overallFairnessScore >= 80) {
+             riskLevel = "Low"; verdict = "Fair";
+          } else if (overallFairnessScore >= 60) {
+             riskLevel = "Medium"; verdict = "Potentially Biased";
+          } else if (overallFairnessScore >= 40) {
+             riskLevel = "High"; verdict = "Biased";
+          } else {
+             riskLevel = "Critical"; verdict = "Severely Biased";
+          }
+          const findings = firstAudit?.executive_summary?.key_findings || [];
+          totalIssuesFound = findings.length;
+          criticalIssues = findings.filter((f:string) => f.toLowerCase().includes('critical') || f.toLowerCase().includes('severe')).length;
+          resultsSummary = findings.slice(0, 3).join('. ');
+        }
+      } else {
+        const score = payload.benchmarks?.current_score || 0;
+        overallFairnessScore = score;
+        if (score >= 80) {
+           riskLevel = "Low"; verdict = "Fair";
+        } else if (score >= 60) {
+           riskLevel = "Medium"; verdict = "Potentially Biased";
+        } else if (score >= 40) {
+           riskLevel = "High"; verdict = "Biased";
+        } else {
+           riskLevel = "Critical"; verdict = "Severely Biased";
+        }
+        const findings = payload.findings || [];
+        totalIssuesFound = findings.length;
+        criticalIssues = findings.filter((f:any) => f.severity === 'Critical').length;
+        resultsSummary = findings.slice(0, 3).map((f:any) => f.title).join('. ');
+      }
+
+      const record = {
+        id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(),
+        fileName: file?.name || "Unknown",
+        fileType: file?.name?.split('.').pop() ? '.' + file.name.split('.').pop() : '.csv',
+        fileSize: file?.size || 0,
+        analysisType: type,
+        timestamp: new Date().toISOString(),
+        overallFairnessScore,
+        riskLevel,
+        verdict,
+        totalIssuesFound,
+        criticalIssues,
+        status: "Completed",
+        resultsSummary: resultsSummary || "Analysis completed successfully.",
+        fullResults: payload
+      };
+
+      if (history.length >= 20) {
+        history.sort((a:any, b:any) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+        history.pop(); 
+      }
+      history.unshift(record);
+      localStorage.setItem('axiom_analysis_history', JSON.stringify(history));
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'QuotaExceededError') {
+        toast.error("Storage is full. Please delete some old analysis records from your profile to save new ones.");
+      } else {
+        console.error("Failed to save history", e);
+      }
+    }
+  };
+
   const fetchInspection = async (target: string) => {
     const formData = new FormData();
     formData.append("target_col", target);
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/inspect", {
+      const res = await fetch(apiUrl('/api/inspect'), {
         method: "POST", body: formData
       });
       const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.detail || data?.error || `Inspection failed (${res.status})`);
+      }
       setInspectResult(data);
     } catch(e) {
       console.error(e);
@@ -44,19 +195,15 @@ export default function Dashboard() {
     setUploadNotice('');
     const uploadedFile = e.target.files[0];
     setFile(uploadedFile);
-    console.log(`[Upload] Selected file: ${uploadedFile.name}, Type: ${uploadedFile.type}, Size: ${uploadedFile.size} bytes`);
 
     const formData = new FormData();
     formData.append("file", uploadedFile);
 
     try {
-      console.log(`[Upload] Sending request to POST /api/upload...`);
-      const res = await fetch("http://127.0.0.1:8000/api/upload", {
+      const res = await fetch(apiUrl('/api/upload'), {
         method: "POST",
         body: formData,
       });
-      
-      console.log(`[Upload] Response status: ${res.status} ${res.statusText}`);
       
       let data;
       try {
@@ -65,10 +212,8 @@ export default function Dashboard() {
         throw new Error(`Invalid JSON response from server (Status: ${res.status}). The backend may have crashed.`);
       }
       
-      console.log(`[Upload] Response payload:`, data);
-      
       if (!res.ok || data.error) {
-        setUploadError(data.error || `Server error ${res.status}`);
+        setUploadError(data.error || data.detail || `Server error ${res.status}`);
         setColumns([]);
         return;
       }
@@ -94,9 +239,8 @@ export default function Dashboard() {
       setMitigateResult(null);
       setDocResult(null);
     } catch (err: any) {
-      console.error("[Upload Error]:", err);
-      // Give meaningful error for fetch failures (like CORS or offline server)
-      if (err.message.includes("Failed to fetch")) {
+      console.error(err);
+      if (err.message?.includes("Failed to fetch")) {
         setUploadError("Network connection failed. Please ensure the backend server is running on port 8000 and CORS is enabled.");
       } else {
         setUploadError(err.message || "Failed to reach the backend server.");
@@ -121,7 +265,7 @@ export default function Dashboard() {
 
   const runAudit = async () => {
     if (selectedSensCols.length === 0) {
-      alert("Please select at least one sensitive column.");
+      toast.error("Please select at least one sensitive column.");
       return;
     }
     setIsAnalyzing(true);
@@ -135,8 +279,7 @@ export default function Dashboard() {
     formData.append("sensitive_cols", selectedSensCols.join(","));
 
     try {
-      console.log(`[Audit Calculation] Sending request to POST /api/audit ...`);
-      const res = await fetch("http://127.0.0.1:8000/api/audit", {
+      const res = await fetch(apiUrl('/api/audit'), {
         method: "POST",
         body: formData,
       });
@@ -149,8 +292,6 @@ export default function Dashboard() {
         setIsAnalyzing(false);
         throw new Error(`The backend returned an unparseable response (Status: ${res.status}). It likely crashed.`);
       }
-
-      console.log(`[Audit Result] Payload:`, data);
       
       if (!res.ok) {
         const errorMsg = data.detail || data.error || "Unknown server error occurred.";
@@ -162,12 +303,13 @@ export default function Dashboard() {
       }
 
       setAuditResult(data);
+      saveAnalysisRecord("Structured Data Analysis", data);
       if (selectedSensCols.length > 0) {
         setMitigateCol(selectedSensCols[0]);
       }
     } catch (err: any) {
-      console.error("[Audit Crash]:", err);
-      alert(`Fairness Analysis Failed:\n${err.message}`);
+      console.error(err);
+      toast.error(`Fairness Analysis Failed: ${err.message}`);
     }
     clearInterval(progressInterval);
     setAnalysisStep(7);
@@ -181,10 +323,8 @@ export default function Dashboard() {
       setAnalysisStep(prev => prev < 7 ? prev + 1 : prev);
     }, 800);
     
-    console.log(`[Document Analysis] Sending request to POST /api/analyze-document...`);
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/analyze-document", { method: "POST" });
-      console.log(`[Document Analysis] Response status: ${res.status}`);
+      const res = await fetch(apiUrl('/api/analyze-document'), { method: "POST" });
       let data;
       try {
         data = await res.json();
@@ -193,16 +333,16 @@ export default function Dashboard() {
         setIsAnalyzing(false);
         throw new Error(`Invalid JSON response from server (Status: ${res.status}). Ensure the backend is running without errors.`);
       }
-      console.log(`[Document Analysis] Response payload:`, data);
       
       if (!res.ok || data.error) {
-        alert(data.error || "Document analysis failed.");
+        toast.error(data.error || "Document analysis failed.");
       } else {
         setDocResult(data);
+        saveAnalysisRecord("Document Analysis", data);
       }
     } catch (err: any) {
-      console.error("[Document Analysis Error]:", err);
-      alert(err.message || "Failed to reach the backend server.");
+      console.error(err);
+      toast.error(err.message || "Failed to reach the backend server.");
     }
     clearInterval(progressInterval);
     setAnalysisStep(7);
@@ -215,14 +355,19 @@ export default function Dashboard() {
     formData.append("sensitive_col", mitigateCol);
 
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/mitigate", {
+      const res = await fetch(apiUrl('/api/mitigate'), {
         method: "POST",
         body: formData,
       });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || errData.error || `Mitigation failed (${res.status})`);
+      }
       const data = await res.json();
       setMitigateResult(data);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      toast.error(err.message || "Mitigation failed. Please try again.");
     }
   };
 
@@ -233,6 +378,8 @@ export default function Dashboard() {
     setSelectedSensCols([]);
     setAuditResult(null);
     setDocResult(null);
+    setViewingRecordName('');
+    setViewingRecordDate('');
     setUploadNotice('');
     setUploadError('');
     setAnalysisStep(0);
@@ -275,52 +422,104 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="bg-background text-foreground min-h-screen pt-24 pb-12">
+    <div className="bg-[#0f111a] text-foreground min-h-screen flex flex-col">
+      <CustomCursor />
       <Navbar />
-      <div className="max-w-7xl mx-auto px-6">
-        <h1 className="text-4xl font-bold mb-8">AI Fairness Dashboard</h1>
+      <div className="max-w-7xl mx-auto px-6 flex-1 w-full pt-24 pb-12 relative z-10">
+        <motion.h1 
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="text-4xl font-bold mb-8 text-transparent bg-clip-text bg-gradient-to-r from-white to-gray-400"
+        >
+          AI Fairness Dashboard
+        </motion.h1>
         
         {/* Step 1: Upload */}
-        <div className="mb-8 p-6 border border-border rounded-xl bg-muted/20">
-          <h2 className="text-xl font-semibold mb-4">1. Data Source</h2>
-          <p className="text-sm text-muted-foreground mb-4">
-            <strong>Supported formats:</strong> You can upload CSV, Excel, JSON, TXT, PDF, DOC, and DOCX files.
-            Structured datasets (CSV / Excel / JSON) work best for fairness analysis.
-          </p>
-          <label
-            htmlFor="file-upload"
-            className="block w-full cursor-pointer"
-          >
-            <div className="flex items-center gap-4">
-              <span
-                className="px-4 py-2 rounded-full text-sm font-semibold text-primary-foreground shrink-0"
-                style={{ background: 'var(--gradient-primary)' }}
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mb-8"
+        >
+          <div className="p-8 border border-border/50 rounded-2xl bg-[#1a1b26]/50 backdrop-blur-md shadow-[0_0_30px_rgba(0,0,0,0.3)] relative overflow-hidden group">
+            <div className="absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none" />
+            
+            <h2 className="text-2xl font-bold mb-4 flex items-center gap-3">
+              <span className="flex items-center justify-center w-8 h-8 rounded-full bg-primary/20 text-primary text-sm shadow-[0_0_10px_rgba(74,222,128,0.2)]">1</span> 
+              Data Source
+            </h2>
+            
+            <p className="text-sm text-muted-foreground mb-6 max-w-2xl">
+              <strong>Supported formats:</strong> CSV, Excel, JSON, TXT, PDF, DOC, DOCX. Upload structured datasets to run AI Bias Audits, or textual documents for Inclusivity Analysis.
+            </p>
+
+            <label htmlFor="file-upload" className="block w-full cursor-pointer relative z-10">
+              <motion.div 
+                whileHover={{ scale: 1.01, borderColor: "var(--primary)" }}
+                whileTap={{ scale: 0.99 }}
+                className={`relative overflow-hidden border-2 border-dashed ${file ? 'border-primary bg-primary/5' : 'border-border bg-[#0f111a]/50'} rounded-xl p-10 flex flex-col items-center justify-center text-center transition-colors duration-300`}
               >
-                Choose File
-              </span>
-              <span className="text-sm text-muted-foreground truncate">
-                {file ? file.name : 'No file chosen'}
-              </span>
-            </div>
-            <input
-              id="file-upload"
-              type="file"
-              accept=".csv,.xlsx,.xls,.txt,.json,.pdf,.doc,.docx"
-              onChange={handleFileUpload}
-              className="sr-only"
-            />
-          </label>
-          {uploadNotice && (
-            <div className="mt-4 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg text-sm text-blue-200">
-              ℹ️ {uploadNotice}
-            </div>
-          )}
-          {uploadError && (
-            <div className="mt-4 p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-sm text-red-500 font-medium">
-              ❌ {uploadError}
-            </div>
-          )}
-        </div>
+                <input
+                  id="file-upload"
+                  type="file"
+                  accept=".csv,.xlsx,.xls,.txt,.json,.pdf,.doc,.docx"
+                  onChange={handleFileUpload}
+                  className="sr-only"
+                />
+                <AnimatePresence mode="wait">
+                  {file ? (
+                    <motion.div 
+                      key="file-view"
+                      initial={{ scale: 0.8, opacity: 0 }} 
+                      animate={{ scale: 1, opacity: 1 }} 
+                      exit={{ scale: 0.8, opacity: 0 }}
+                      className="flex flex-col items-center gap-3 pointer-events-none"
+                    >
+                      <div className="w-16 h-16 rounded-full bg-primary/20 flex items-center justify-center mb-2 shadow-[0_0_15px_rgba(74,222,128,0.4)]">
+                        <FileCheck className="w-8 h-8 text-primary" />
+                      </div>
+                      <p className="font-bold text-lg text-primary">{file.name}</p>
+                      <p className="text-sm text-muted-foreground">{(file.size / 1024).toFixed(1)} KB • Ready for analysis</p>
+                      <span className="mt-2 text-xs font-semibold uppercase tracking-wider text-primary/70 group-hover:text-primary transition-colors">Click to replace data</span>
+                    </motion.div>
+                  ) : (
+                    <motion.div 
+                      key="empty-view"
+                      initial={{ scale: 0.8, opacity: 0 }} 
+                      animate={{ scale: 1, opacity: 1 }} 
+                      exit={{ scale: 0.8, opacity: 0 }}
+                      className="flex flex-col items-center gap-4 text-muted-foreground group-hover:text-foreground transition-colors pointer-events-none"
+                    >
+                      <div className="w-16 h-16 rounded-full bg-[#1a1b26] flex items-center justify-center mb-2 shadow-lg group-hover:shadow-[0_0_20px_rgba(74,222,128,0.2)] transition-shadow">
+                        <Upload className="w-8 h-8 group-hover:text-primary transition-colors" />
+                      </div>
+                      <div>
+                        <p className="font-bold text-lg mb-1">Click to Upload or Drag & Drop</p>
+                        <p className="text-sm text-muted-foreground/70">Seamlessly process datasets & documents in seconds</p>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </motion.div>
+            </label>
+
+            <AnimatePresence>
+              {uploadNotice && (
+                <motion.div initial={{ opacity: 0, height: 0, y: -10 }} animate={{ opacity: 1, height: 'auto', y: 0 }} exit={{ opacity: 0, height: 0 }} className="mt-6 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg text-sm text-blue-200">
+                  <Info className="w-4 h-4 inline mr-2 align-text-bottom min-w-4" />
+                  {uploadNotice}
+                </motion.div>
+              )}
+            </AnimatePresence>
+            <AnimatePresence>
+              {uploadError && (
+                <motion.div initial={{ opacity: 0, height: 0, y: -10 }} animate={{ opacity: 1, height: 'auto', y: 0 }} exit={{ opacity: 0, height: 0 }} className="mt-6 p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-sm text-red-500 font-medium">
+                  <AlertTriangle className="w-4 h-4 inline mr-2 align-text-bottom min-w-4" />
+                  {uploadError}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </motion.div>
 
         {/* Step 2: Configuration & Analysis */}
         {file && !uploadError && (
@@ -439,6 +638,16 @@ export default function Dashboard() {
             {/* Step 3: Results Section */}
             {(auditResult || docResult) && (
               <div className="mt-12 space-y-6 animate-in slide-in-from-bottom-4 duration-500 relative">
+                
+                {viewingRecordName && (
+                  <div className="p-4 mb-4 bg-primary/10 border border-primary/30 rounded-lg flex items-center justify-between">
+                    <p className="text-sm text-primary font-medium">Viewing saved results for <strong>{viewingRecordName}</strong> — analyzed on {viewingRecordDate}</p>
+                    <button onClick={startNewAnalysis} className="px-3 py-1.5 bg-primary text-primary-foreground rounded text-sm font-medium hover:bg-primary/90 transition">
+                      Run New Analysis
+                    </button>
+                  </div>
+                )}
+
                 <div className="flex flex-col md:flex-row justify-between items-start md:items-center border-b border-border pb-4 mb-6 sticky top-0 bg-background/95 backdrop-blur z-10 pt-4">
                   <h2 className="text-2xl font-bold">
                     2. Fairness Analysis Results

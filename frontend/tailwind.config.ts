@@ -76,10 +76,6 @@ export default {
           from: { height: "var(--radix-accordion-content-height)" },
           to: { height: "0" },
         },
-        "marquee": {
-          "0%": { transform: "translateX(0)" },
-          "100%": { transform: "translateX(-50%)" },
-        },
         "scroll-dot": {
           "0%, 100%": { transform: "translateY(0)", opacity: "1" },
           "50%": { transform: "translateY(12px)", opacity: "0.3" },
@@ -92,7 +88,6 @@ export default {
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
-        "marquee": "marquee 30s linear infinite",
         "scroll-dot": "scroll-dot 2s ease-in-out infinite",
         "glow-pulse": "glow-pulse 2s ease-in-out infinite",
       },

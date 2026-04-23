@@ -1,12 +1,15 @@
 import { motion } from 'framer-motion';
 import ShaderBackground from './ShaderBackground';
 import ScrollIndicator from './ScrollIndicator';
-import { ArrowRight, Play } from 'lucide-react';
+import { ArrowRight, BookOpen } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { useAuth } from '@/contexts/AuthContext';
 
 const words = ['AXiOM'];
 
 export default function HeroSection() {
+  const { user } = useAuth();
+
   return (
     <section id="about" className="relative min-h-screen flex items-center justify-center overflow-hidden">
       <ShaderBackground />
@@ -59,13 +62,13 @@ export default function HeroSection() {
             className="group flex items-center gap-2 px-7 py-3 rounded-full text-sm font-medium text-primary-foreground transition-transform duration-200 active:scale-[0.97]"
             style={{ background: 'var(--gradient-primary)' }}
           >
-            Explore Solution
+            {user ? 'Go to Dashboard' : 'Explore Solution'}
             <ArrowRight size={16} className="transition-transform duration-300 group-hover:translate-x-1" />
           </Link>
-          <button className="flex items-center gap-2 px-7 py-3 rounded-full text-sm font-medium border border-border text-foreground hover:bg-foreground/5 transition-all duration-300 active:scale-[0.97]">
-            <Play size={14} />
-            Watch Demo
-          </button>
+          <Link to="/how-it-works" className="flex items-center gap-2 px-7 py-3 rounded-full text-sm font-medium border border-border text-foreground hover:bg-foreground/5 transition-all duration-300 active:scale-[0.97]">
+            <BookOpen size={14} />
+            How It Works
+          </Link>
         </motion.div>
       </div>
 

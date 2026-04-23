@@ -1,11 +1,24 @@
 import io
 import os
 import json
+import time
+import asyncio
+import math
+import re
+import hmac
+import hashlib
+import secrets
+import logging
+from datetime import datetime, timezone
+from typing import Dict, List, Literal, Optional
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from dotenv import load_dotenv
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from pydantic import BaseModel, Field
 from bias_detector import BiasDetector
 from bias_mitigator import BiasMitigator
 from data_inspector import DataInspector
@@ -18,6 +31,11 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("axiom")
+
 def _to_python(obj):
     """Recursively convert numpy scalars → Python natives so FastAPI can serialize."""
     if isinstance(obj, dict):
@@ -26,13 +44,90 @@ def _to_python(obj):
         return [_to_python(i) for i in obj]
     if isinstance(obj, (np.integer,)):
         return int(obj)
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
     if isinstance(obj, (np.floating,)):
-        return float(obj)
+        val = float(obj)
+        return val if math.isfinite(val) else None
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     if isinstance(obj, np.bool_):
         return bool(obj)
     return obj
+
+
+def get_numeric_columns(df: pd.DataFrame) -> List[str]:
+    return df.select_dtypes(include=[np.number]).columns.tolist()
+
+
+def get_categorical_columns(df: pd.DataFrame) -> List[str]:
+    return df.select_dtypes(include=["object", "category", "string", "bool"]).columns.tolist()
+
+
+def preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Prepare mixed-type data so statistical operations only run on numeric series."""
+    df_safe = df.copy()
+
+    if len(df_safe) == 0:
+        return df_safe
+
+    categorical_cols = get_categorical_columns(df_safe)
+    for col in categorical_cols:
+        try:
+            converted = pd.to_numeric(df_safe[col], errors="coerce")
+            if converted.notna().sum() / len(df_safe) > 0.5:
+                df_safe[col] = converted
+        except Exception:
+            pass
+
+    numeric_cols = get_numeric_columns(df_safe)
+    categorical_cols = get_categorical_columns(df_safe)
+
+    for col in numeric_cols:
+        if df_safe[col].isnull().any():
+            med = df_safe[col].median()
+            df_safe[col] = df_safe[col].fillna(med if not pd.isna(med) else 0)
+
+    for col in categorical_cols:
+        if df_safe[col].isnull().any():
+            mode = df_safe[col].mode(dropna=True)
+            fallback = mode.iloc[0] if not mode.empty else "Unknown"
+            df_safe[col] = df_safe[col].fillna(fallback)
+
+    return df_safe
+
+
+def prepare_target_column(df: pd.DataFrame, target_col: str) -> pd.DataFrame:
+    """Convert target column to numeric/binary safely (supports Yes/No style labels)."""
+    if target_col not in df.columns:
+        raise ValueError(f"Target column '{target_col}' not found.")
+
+    yes_values = {"yes", "true", "1", "approved", "hired", "accepted", "pass", "positive"}
+    no_values = {"no", "false", "0", "rejected", "not hired", "denied", "fail", "negative"}
+
+    series = df[target_col]
+    if not pd.api.types.is_numeric_dtype(series):
+        s = series.astype(str).str.strip().str.lower()
+        mapping: Dict[str, int] = {}
+        uniques = [u for u in s.dropna().unique().tolist() if u not in {"nan", "none", ""}]
+
+        for val in uniques:
+            if val in yes_values:
+                mapping[val] = 1
+            elif val in no_values:
+                mapping[val] = 0
+
+        if len(mapping) < 2 and len(uniques) == 2:
+            mapping = {uniques[0]: 1, uniques[1]: 0}
+
+        if mapping:
+            df[target_col] = s.map(mapping)
+        else:
+            df[target_col] = pd.Categorical(s).codes
+            df.loc[df[target_col] < 0, target_col] = np.nan
+
+    df[target_col] = pd.to_numeric(df[target_col], errors="coerce")
+    return df
 
 app = FastAPI(title="Axiom API")
 
@@ -44,7 +139,131 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.info("%s %s", request.method, request.url.path)
+    try:
+        response = await call_next(request)
+        logger.info("%s %s -> %s", request.method, request.url.path, response.status_code)
+        return response
+    except Exception:
+        logger.exception("%s %s -> ERROR", request.method, request.url.path)
+        raise
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal error occurred. Please try again.", "error_type": type(exc).__name__},
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
 SESSION_DATA = {}
+
+class ConversationTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=8000)
+
+
+class AnalysisContextPayload(BaseModel):
+    hasActiveAnalysis: bool = False
+    fileType: Optional[str] = None
+    fileName: Optional[str] = None
+    fairnessScore: Optional[float] = None
+    riskLevel: Optional[str] = None
+    keyFindings: List[str] = Field(default_factory=list)
+    metrics: Dict[str, float] = Field(default_factory=dict)
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=4000)
+    conversationHistory: List[ConversationTurn] = Field(default_factory=list)
+    analysisContext: Optional[AnalysisContextPayload] = None
+
+
+CHAT_SYSTEM_PROMPT = """You are AXiOM AI, an expert assistant for AI fairness, bias detection, and compliance.
+
+Core scope:
+- Explain fairness and bias concepts clearly and accurately.
+- Explain and compare fairness metrics such as Demographic Parity, Disparate Impact, Equalized Odds, Equal Opportunity, Calibration, and related diagnostics.
+- Guide users on how to use the AXiOM platform (uploading data, inspecting, auditing, and mitigation workflows).
+- Provide practical remediation options (data, model, thresholding, governance, monitoring).
+- Provide compliance-oriented guidance for EEOC, EU AI Act, GDPR, and similar frameworks.
+- Use any provided analysis context to give tailored, context-aware responses.
+
+Response style:
+- Be concise but actionable.
+- Prefer structured answers with bullet points, short tables, or checklists when helpful.
+- If information is uncertain, say so and suggest what data would reduce uncertainty.
+- Never invent AXiOM features that are not explicitly described by the provided context.
+
+Safety:
+- Do not provide legal advice; provide compliance guidance and recommend consulting counsel where appropriate.
+- Do not claim certainty when only partial analysis context is provided.
+"""
+
+CHAT_RATE_LIMIT: Dict[str, List[float]] = {}
+
+# Local auth store/session state for hackathon reliability.
+AUTH_USERS_PATH = os.path.join(os.path.dirname(__file__), "auth_users.json")
+AUTH_USERS: Dict[str, Dict[str, str]] = {}
+AUTH_TOKENS: Dict[str, str] = {}
+
+
+def _load_auth_users() -> None:
+    global AUTH_USERS
+    if not os.path.exists(AUTH_USERS_PATH):
+        AUTH_USERS = {}
+        return
+    try:
+        with open(AUTH_USERS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            AUTH_USERS = data if isinstance(data, dict) else {}
+    except Exception:
+        AUTH_USERS = {}
+
+
+def _save_auth_users() -> None:
+    with open(AUTH_USERS_PATH, "w", encoding="utf-8") as f:
+        json.dump(AUTH_USERS, f, ensure_ascii=True, indent=2)
+
+
+def _normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def _is_valid_email(email: str) -> bool:
+    return bool(re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email))
+
+
+def _hash_password(password: str, salt: str) -> str:
+    return hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+
+
+def _verify_password(password: str, salt: str, password_hash: str) -> bool:
+    expected = _hash_password(password, salt)
+    return hmac.compare_digest(expected, password_hash)
+
+
+def _extract_bearer_token(authorization: Optional[str]) -> Optional[str]:
+    if not authorization:
+        return None
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2:
+        return None
+    if parts[0].lower() != "bearer":
+        return None
+    return parts[1].strip()
+
+
+_load_auth_users()
 
 # ─────────────────────────────────────────────────────────
 # AUTH ENDPOINTS  (Supabase Auth)
@@ -52,80 +271,106 @@ SESSION_DATA = {}
 
 @app.post("/api/auth/signup")
 async def auth_signup(email: str = Form(...), password: str = Form(...)):
-    """Register a new user with Supabase Auth."""
-    if not supabase:
-        import uuid
-        return {
-            "user": {"id": str(uuid.uuid4()), "email": email},
-            "access_token": f"mock_token_{uuid.uuid4()}",
-            "message": "Account created. (Running in Local Mock Mode)"
-        }
-    try:
-        res = supabase.auth.sign_up({"email": email, "password": password})
-        if res.user is None:
-            return {"error": "Sign-up failed. The email may already be registered."}
-        return {
-            "user": {"id": res.user.id, "email": res.user.email},
-            "access_token": res.session.access_token if res.session else None,
-            "message": "Account created. Check your email to confirm if email confirmation is enabled."
-        }
-    except Exception as e:
-        return {"error": str(e)}
+    """Register a new account using local auth storage."""
+    email = _normalize_email(email)
+
+    if not _is_valid_email(email):
+        raise HTTPException(status_code=400, detail="Please enter a valid email address.")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
+    if email in AUTH_USERS:
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+
+    user_id = secrets.token_hex(8)
+    salt = secrets.token_hex(16)
+    AUTH_USERS[email] = {
+        "id": user_id,
+        "email": email,
+        "salt": salt,
+        "password_hash": _hash_password(password, salt),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _save_auth_users()
+
+    token = secrets.token_urlsafe(32)
+    AUTH_TOKENS[token] = user_id
+
+    return {
+        "user": {
+            "id": user_id,
+            "email": email,
+            "createdAt": AUTH_USERS[email]["created_at"],
+        },
+        "access_token": token,
+        "token": token,
+        "message": "Account created successfully.",
+    }
 
 
 @app.post("/api/auth/login")
 async def auth_login(email: str = Form(...), password: str = Form(...)):
-    """Log in with email + password via Supabase Auth."""
-    if not supabase:
-        import uuid
-        return {
-            "user": {"id": str(uuid.uuid4()), "email": email},
-            "access_token": f"mock_token_{uuid.uuid4()}",
-            "refresh_token": f"mock_refresh_{uuid.uuid4()}",
-        }
-    try:
-        res = supabase.auth.sign_in_with_password({"email": email, "password": password})
-        return {
-            "user": {"id": res.user.id, "email": res.user.email},
-            "access_token": res.session.access_token,
-            "refresh_token": res.session.refresh_token,
-        }
-    except Exception as e:
-        return {"error": "Invalid email or password."}
+    """Log in with email + password using local auth storage."""
+    email = _normalize_email(email)
+
+    user = AUTH_USERS.get(email)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    if not _verify_password(password, user["salt"], user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    token = secrets.token_urlsafe(32)
+    AUTH_TOKENS[token] = user["id"]
+
+    return {
+        "user": {"id": user["id"], "email": user["email"]},
+        "access_token": token,
+        "token": token,
+    }
 
 
 @app.post("/api/auth/logout")
-async def auth_logout():
-    """Sign out (invalidates current Supabase session server-side)."""
-    if not supabase:
-        return {"ok": True}
-    try:
-        supabase.auth.sign_out()
-    except Exception:
-        pass
+async def auth_logout(authorization: Optional[str] = Header(default=None)):
+    """Sign out by invalidating the current local bearer token."""
+    token = _extract_bearer_token(authorization)
+    if token:
+        AUTH_TOKENS.pop(token, None)
     return {"ok": True}
 
 
 @app.get("/api/auth/me")
-async def auth_me():
-    """Return the currently signed-in user (if any)."""
-    if not supabase:
+async def auth_me(authorization: Optional[str] = Header(default=None)):
+    """Return current user from local bearer token."""
+    token = _extract_bearer_token(authorization)
+    if not token:
         return {"user": None}
-    try:
-        res = supabase.auth.get_user()
-        if res and res.user:
-            return {"user": {"id": res.user.id, "email": res.user.email}}
-    except Exception:
-        pass
+
+    user_id = AUTH_TOKENS.get(token)
+    if not user_id:
+        return {"user": None}
+
+    for user in AUTH_USERS.values():
+        if user["id"] == user_id:
+            return {"user": {"id": user["id"], "email": user["email"]}}
     return {"user": None}
 
 
 @app.post("/api/upload")
 async def upload_dataset(file: UploadFile = File(...)):
     try:
+        if file is None:
+            raise HTTPException(status_code=400, detail="No file provided")
+
         contents = await file.read()
         filename = file.filename or ""
         ext = os.path.splitext(filename)[1].lower()
+        max_size = 50 * 1024 * 1024
+
+        if len(contents) == 0:
+            raise HTTPException(status_code=400, detail="File is empty")
+
+        if len(contents) > max_size:
+            raise HTTPException(status_code=400, detail="File too large. Maximum size is 50MB.")
 
         # --- Document / non-tabular file types: store but inform user ---
         DOCUMENT_TYPES = {".pdf", ".doc", ".docx", ".txt"}
@@ -172,7 +417,10 @@ async def upload_dataset(file: UploadFile = File(...)):
                     "missing_cells": 0,
                 }
         else:
-            return {"error": f"Unsupported file type '{ext}'. Please upload CSV, Excel (.xlsx/.xls), JSON, TXT, PDF, DOC, or DOCX."}
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type '{ext}'. Please upload CSV, Excel (.xlsx/.xls), JSON, TXT, PDF, DOC, or DOCX.",
+            )
 
         SESSION_DATA['df'] = df
         SESSION_DATA['filename'] = filename
@@ -190,9 +438,10 @@ async def upload_dataset(file: UploadFile = File(...)):
             "preview": preview,
             "missing_cells": int(df.isnull().sum().sum())
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        import traceback
-        return {"error": f"Error parsing uploaded file: {str(e)}", "trace": traceback.format_exc()}
+        raise HTTPException(status_code=400, detail=f"Error parsing uploaded file: {str(e)}")
 
 
 @app.post("/api/analyze-document")
@@ -449,14 +698,17 @@ async def analyze_document():
 async def run_inspection(target_col: str = Form(...)):
     df = SESSION_DATA.get('df')
     if df is None or not isinstance(df, pd.DataFrame):
-        return {"error": "No tabular dataset uploaded."}
+        raise HTTPException(status_code=400, detail="No tabular dataset uploaded.")
+
+    if target_col not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Target column '{target_col}' does not exist in uploaded file.")
     
     counts = df[target_col].value_counts().to_dict()
     if len(counts) >= 2:
         vals = list(counts.values())
         highest = max(vals)
         lowest = min(vals)
-        imbalance = highest / lowest if lowest > 0 else float('inf')
+        imbalance = highest / lowest if lowest > 0 else float(highest)
     else:
         imbalance = 1.0
         
@@ -468,12 +720,12 @@ async def run_inspection(target_col: str = Form(...)):
         
     preview = df.head(100).to_dict(orient="records")
     
-    return {
+    return _to_python({
         "distribution": counts,
         "imbalance_ratio": imbalance,
         "severity": severity,
         "preview_100": preview
-    }
+    })
 
 @app.post("/api/audit")
 async def run_audit(target_col: str = Form(...), sensitive_cols: str = Form(...)):
@@ -484,10 +736,18 @@ async def run_audit(target_col: str = Form(...), sensitive_cols: str = Form(...)
         
     try:
         s_cols_list = [c.strip() for c in sensitive_cols.split(",") if c.strip()]
+        if target_col not in df.columns:
+            raise HTTPException(status_code=400, detail=f"Target column '{target_col}' does not exist in uploaded file.")
+        missing_sensitive = [c for c in s_cols_list if c not in df.columns]
+        if missing_sensitive:
+            raise HTTPException(status_code=400, detail=f"Sensitive columns not found: {', '.join(missing_sensitive)}")
+
+        df_work = preprocess_dataframe(df)
+        df_work = prepare_target_column(df_work, target_col)
         
-        feature_cols = [c for c in df.columns if c != target_col]
+        feature_cols = [c for c in df_work.columns if c != target_col]
         
-        df_clean = df[feature_cols + [target_col]].copy()
+        df_clean = df_work[feature_cols + [target_col]].copy()
         
         # Drop rows where target is missing
         df_clean = df_clean.dropna(subset=[target_col])
@@ -498,11 +758,12 @@ async def run_audit(target_col: str = Form(...), sensitive_cols: str = Form(...)
         # Fill remaining missing values to prevent row loss
         for col in df_clean.columns:
             if col != target_col:
-                if df_clean[col].dtype in ['object', 'category']:
-                    df_clean[col] = df_clean[col].fillna('Missing')
-                else:
+                if pd.api.types.is_numeric_dtype(df_clean[col]):
                     median_val = df_clean[col].median()
                     df_clean[col] = df_clean[col].fillna(median_val if not pd.isna(median_val) else 0)
+                else:
+                    mode = df_clean[col].mode(dropna=True)
+                    df_clean[col] = df_clean[col].fillna(mode.iloc[0] if not mode.empty else 'Missing')
                     
         if len(df_clean) < 10:
              return {"error": f"Dataset contains too few valid rows ({len(df_clean)}) after cleaning. Need at least 10."}
@@ -511,7 +772,13 @@ async def run_audit(target_col: str = Form(...), sensitive_cols: str = Form(...)
         df_enc, le_dict = encode_categorical(df_clean)
         
         X = df_enc[feature_cols]
-        y = df_enc[target_col]
+        y = pd.to_numeric(df_enc[target_col], errors="coerce")
+        valid_idx = y.notna()
+        X = X.loc[valid_idx]
+        y = y.loc[valid_idx]
+
+        if y.nunique() < 2:
+            raise HTTPException(status_code=400, detail="Target column must contain at least two distinct values after preprocessing.")
         
         if y.nunique() > 2:
             y = (y > y.median()).astype(int)
@@ -540,13 +807,17 @@ async def run_audit(target_col: str = Form(...), sensitive_cols: str = Form(...)
         
         acc = accuracy_score(y_test, y_pred)
         
-        session = create_session(
-            dataset_name=filename,
-            row_count=len(df),
-            column_count=len(df.columns),
-            target_column=target_col,
-            sensitive_columns=s_cols_list
-        )
+        session = None
+        try:
+            session = create_session(
+                dataset_name=filename,
+                row_count=len(df),
+                column_count=len(df.columns),
+                target_column=target_col,
+                sensitive_columns=s_cols_list
+            )
+        except Exception:
+            session = None
         if session:
             SESSION_DATA['session_id'] = session['id']
             
@@ -584,18 +855,24 @@ async def run_audit(target_col: str = Form(...), sensitive_cols: str = Form(...)
             audits[s_col] = audit
             
             if session:
-                saved = save_bias_audit(
-                    session_id=session['id'],
-                    sensitive_attribute=s_col,
-                    audit_results=audit,
-                    model_type="RandomForestClassifier",
-                    model_accuracy=float(acc)
-                )
-                if saved:
-                    SESSION_DATA['audit_db_ids'][s_col] = saved['id']
+                try:
+                    saved = save_bias_audit(
+                        session_id=session['id'],
+                        sensitive_attribute=s_col,
+                        audit_results=audit,
+                        model_type="RandomForestClassifier",
+                        model_accuracy=float(acc)
+                    )
+                    if saved:
+                        SESSION_DATA['audit_db_ids'][s_col] = saved['id']
+                except Exception:
+                    pass
                     
         if session:
-            update_session_status(session['id'], "completed")
+            try:
+                update_session_status(session['id'], "completed")
+            except Exception:
+                pass
             
         SESSION_DATA['model_context'] = {
             'X_train': X_train, 'y_train': y_train,
@@ -607,9 +884,21 @@ async def run_audit(target_col: str = Form(...), sensitive_cols: str = Form(...)
         }
         
         return JSONResponse(content=_to_python({"accuracy": acc, "audits": audits}))
+    except HTTPException:
+        raise
+    except ValueError as e:
+        msg = str(e)
+        if "string dtype" in msg.lower() or "could not convert" in msg.lower():
+            raise HTTPException(
+                status_code=400,
+                detail="Some columns contain text values that could not be analyzed statistically. Ensure the target column is numeric or Yes/No style values.",
+            )
+        raise HTTPException(status_code=400, detail=msg)
     except Exception as e:
-        import traceback
-        return {"error": str(e), "trace": traceback.format_exc()}
+        raise HTTPException(
+            status_code=500,
+            detail=f"Analysis error: {str(e)}. Please check file format and target/sensitive columns.",
+        )
 
 @app.post("/api/mitigate")
 async def run_mitigation(strategy: str = Form(...), sensitive_col: str = Form(...)):
@@ -668,6 +957,124 @@ async def run_mitigation(strategy: str = Form(...), sensitive_col: str = Form(..
     except Exception as e:
         import traceback
         return {"error": str(e), "trace": traceback.format_exc()}
+
+
+@app.post("/api/chat")
+async def chat_with_axiom_ai(payload: ChatRequest, request: Request):
+    client_id = request.client.host if request.client else "unknown"
+    now = time.time()
+    recent = [ts for ts in CHAT_RATE_LIMIT.get(client_id, []) if now - ts < 60]
+    if len(recent) >= 30:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait a moment and try again.")
+    recent.append(now)
+    CHAT_RATE_LIMIT[client_id] = recent
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Chatbot is currently unavailable. Please configure the Gemini API key.")
+
+    try:
+        import google.generativeai as genai
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Gemini SDK is not installed. Add 'google-generativeai' to backend dependencies.",
+        )
+
+    try:
+        genai.configure(api_key=api_key)
+        configured_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        model_candidates = [
+            configured_model,
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+        ]
+        # Keep order while removing duplicates.
+        model_candidates = list(dict.fromkeys(model_candidates))
+
+        history = payload.conversationHistory[-20:]
+        context_payload = payload.analysisContext.model_dump() if payload.analysisContext else None
+        context_json = json.dumps(context_payload, ensure_ascii=False, indent=2)
+
+        gemini_contents = [
+            {
+                "role": "user",
+                "parts": [
+                    "Current AXiOM analysis context (JSON). Use it when relevant and say when context is missing:\n"
+                    + context_json
+                ],
+            }
+        ]
+
+        for turn in history:
+            role = "model" if turn.role == "assistant" else "user"
+            gemini_contents.append({"role": role, "parts": [turn.content]})
+
+        gemini_contents.append({"role": "user", "parts": [payload.message]})
+
+        response = None
+        last_error = None
+        for candidate in model_candidates:
+            try:
+                model = genai.GenerativeModel(
+                    model_name=candidate,
+                    generation_config={
+                        "temperature": 0.7,
+                        "top_p": 0.95,
+                        "top_k": 40,
+                        "max_output_tokens": 1024,
+                    },
+                    safety_settings=[
+                        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                    ],
+                    system_instruction=CHAT_SYSTEM_PROMPT,
+                )
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(model.generate_content, gemini_contents),
+                    timeout=30,
+                )
+                break
+            except Exception as candidate_error:
+                last_error = candidate_error
+                err_text = str(candidate_error).lower()
+                # Retry only for unsupported/missing model cases; otherwise fail fast.
+                if ("not found" in err_text) or ("not supported" in err_text):
+                    continue
+                raise
+
+        if response is None:
+            raise RuntimeError(f"No compatible Gemini model available. Last error: {last_error}")
+
+        reply = getattr(response, "text", None)
+        if not reply:
+            reply = "I could not generate a response right now. Please try rephrasing your question."
+
+        return {
+            "response": reply,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="Request timed out after 30 seconds. Please try again.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        err_text = str(e)
+        err_lower = err_text.lower()
+        if "quota" in err_lower or "rate limit" in err_lower or "429" in err_lower:
+            raise HTTPException(
+                status_code=429,
+                detail="Gemini API quota/rate limit exceeded for this key. Please check billing/quota and try again.",
+            )
+        if "api key" in err_lower or "permission" in err_lower or "unauthorized" in err_lower or "403" in err_lower:
+            raise HTTPException(
+                status_code=503,
+                detail="Gemini API access failed for the configured key. Verify key validity and project permissions.",
+            )
+        raise HTTPException(status_code=500, detail=f"Gemini request failed: {err_text}")
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { apiUrl } from '@/services/api';
 
 interface User {
   id: string;
@@ -26,8 +27,6 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
-const API = 'http://127.0.0.1:8000';
-
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
@@ -52,15 +51,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = async (email: string, password: string): Promise<string | null> => {
+    const normalizedEmail = email.trim().toLowerCase();
     try {
-      const body = new URLSearchParams({ email, password });
-      const res = await fetch(`${API}/api/auth/login`, { method: 'POST', body });
+      const body = new URLSearchParams({ email: normalizedEmail, password });
+      const res = await fetch(apiUrl('/api/auth/login'), { method: 'POST', body });
       const data = await res.json();
       
       if (!res.ok || data.error || data.detail) {
-        // Fallback for UI testing
-        if (email === "test@test.com") {
-          const mockUser = { id: "mock_123", email };
+        // Dev-only fallback for UI testing
+        if (import.meta.env.DEV && normalizedEmail === "test@test.com") {
+          const mockUser = { id: "mock_123", email: normalizedEmail };
           setUser(mockUser);
           setToken("mock_token");
           localStorage.setItem('axiom_token', "mock_token");
@@ -76,8 +76,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       localStorage.setItem('axiom_user', JSON.stringify(data.user));
       return null;
     } catch (err) {
-      if (email === "test@test.com") {
-        const mockUser = { id: "mock_123", email };
+      if (import.meta.env.DEV && normalizedEmail === "test@test.com") {
+        const mockUser = { id: "mock_123", email: normalizedEmail };
         setUser(mockUser);
         setToken("mock_token");
         localStorage.setItem('axiom_token', "mock_token");
@@ -89,14 +89,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signup = async (email: string, password: string): Promise<string | null> => {
+    const normalizedEmail = email.trim().toLowerCase();
     try {
-      const body = new URLSearchParams({ email, password });
-      const res = await fetch(`${API}/api/auth/signup`, { method: 'POST', body });
+      const body = new URLSearchParams({ email: normalizedEmail, password });
+      const res = await fetch(apiUrl('/api/auth/signup'), { method: 'POST', body });
       const data = await res.json();
       
       if (!res.ok || data.error || data.detail) {
-        if (email === "test@test.com") {
-          const mockUser = { id: "mock_123", email };
+        if (import.meta.env.DEV && normalizedEmail === "test@test.com") {
+          const mockUser = { id: "mock_123", email: normalizedEmail };
           setUser(mockUser);
           setToken("mock_token");
           localStorage.setItem('axiom_token', "mock_token");
@@ -114,8 +115,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       return null;
     } catch (err) {
-      if (email === "test@test.com") {
-        const mockUser = { id: "mock_123", email };
+      if (import.meta.env.DEV && normalizedEmail === "test@test.com") {
+        const mockUser = { id: "mock_123", email: normalizedEmail };
         setUser(mockUser);
         setToken("mock_token");
         localStorage.setItem('axiom_token', "mock_token");
@@ -127,7 +128,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const logout = async () => {
-    await fetch(`${API}/api/auth/logout`, { method: 'POST' }).catch(() => {});
+    await fetch(apiUrl('/api/auth/logout'), {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    }).catch(() => {});
     setUser(null);
     setToken(null);
     localStorage.removeItem('axiom_token');

@@ -4,7 +4,6 @@ import ProblemSection from '@/components/ProblemSection';
 import ObjectiveSection from '@/components/ObjectiveSection';
 import SolutionSection from '@/components/SolutionSection';
 import FeaturesGrid from '@/components/FeaturesGrid';
-import SocialProof from '@/components/SocialProof';
 import CTASection from '@/components/CTASection';
 import Footer from '@/components/Footer';
 import CustomCursor from '@/components/CustomCursor';
@@ -21,7 +20,6 @@ export default function Index() {
       <ObjectiveSection />
       <SolutionSection />
       <FeaturesGrid />
-      <SocialProof />
       <CTASection />
       <Footer />
     </div>

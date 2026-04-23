@@ -1,17 +1,27 @@
-import { useState, useRef } from 'react';
-import { motion } from 'framer-motion';
+import { useState, useRef, useEffect } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '@/contexts/AuthContext';
-import { Navigate } from 'react-router-dom';
-import { Camera, Check, Shield, Trash2, Mail, Bell, Key } from 'lucide-react';
+import { Navigate, useNavigate } from 'react-router-dom';
+import { Camera, Check, Shield, Trash2, Mail, Bell, Key, FileText, BarChart2, Calendar, FileCheck, X, AlertTriangle, Eye, ChevronDown } from 'lucide-react';
 import Navbar from '@/components/Navbar';
+
+function formatRelativeTime(dateString: string) {
+  const date = new Date(dateString);
+  const now = new Date();
+  const diffInSeconds = Math.floor((now.getTime() - date.getTime()) / 1000);
+  
+  if (diffInSeconds < 60) return 'Just now';
+  if (diffInSeconds < 3600) return `${Math.floor(diffInSeconds / 60)} minutes ago`;
+  if (diffInSeconds < 86400) return `${Math.floor(diffInSeconds / 3600)} hours ago`;
+  if (diffInSeconds < 172800) return 'Yesterday';
+  
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
 
 export default function Profile() {
   const { user, updateUser } = useAuth();
-  
-  if (!user) {
-    return <Navigate to="/login" replace />;
-  }
 
+  // All hooks must be declared unconditionally (Rules of Hooks)
   const [isEditing, setIsEditing] = useState(false);
   const [formData, setFormData] = useState({
     full_name: user?.user_metadata?.full_name || '',
@@ -23,13 +33,63 @@ export default function Profile() {
   });
 
   const [savedToast, setSavedToast] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const navigate = useNavigate();
+
+  const [history, setHistory] = useState<any[]>([]);
+  const [sortParam, setSortParam] = useState('newest');
+  const [deleteCandidate, setDeleteCandidate] = useState<string | null>(null);
+
+  useEffect(() => {
+    const historyStr = localStorage.getItem('axiom_analysis_history');
+    if (historyStr) {
+      try {
+        setHistory(JSON.parse(historyStr));
+      } catch {
+        setHistory([]);
+      }
+    }
+  }, []);
+
+  // Guard after all hooks
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  const handleSort = (param: string) => {
+    setSortParam(param);
+    let sorted = [...history];
+    if (param === 'newest') sorted.sort((a,b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    if (param === 'oldest') sorted.sort((a,b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    if (param === 'lowest_score') sorted.sort((a,b) => a.overallFairnessScore - b.overallFairnessScore);
+    if (param === 'highest_risk') {
+      const riskWeight: any = { "Critical": 4, "High": 3, "Medium": 2, "Low": 1 };
+      sorted.sort((a,b) => riskWeight[b.riskLevel] - riskWeight[a.riskLevel]);
+    }
+    setHistory(sorted);
+  };
+
+  const confirmDelete = () => {
+    if (!deleteCandidate) return;
+    const newHistory = history.filter(h => h.id !== deleteCandidate);
+    setHistory(newHistory);
+    localStorage.setItem('axiom_analysis_history', JSON.stringify(newHistory));
+    setDeleteCandidate(null);
+  };
 
   const handleSave = async () => {
-    await updateUser(formData);
-    setIsEditing(false);
-    setSavedToast(true);
-    setTimeout(() => setSavedToast(false), 3000);
+    setIsSaving(true);
+    try {
+      await updateUser(formData);
+      setIsEditing(false);
+      setSavedToast(true);
+      setTimeout(() => setSavedToast(false), 3000);
+    } catch {
+      // updateUser is local-only; errors are unlikely but guard anyway
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -230,10 +290,11 @@ export default function Profile() {
                   </button>
                   <button 
                     onClick={handleSave}
-                    className="px-8 py-2.5 rounded-full font-semibold text-sm text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90 transition-opacity"
+                    disabled={isSaving}
+                    className="px-8 py-2.5 rounded-full font-semibold text-sm text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90 transition-opacity disabled:opacity-60 disabled:cursor-not-allowed"
                     style={{ background: 'var(--gradient-primary)' }}
                   >
-                    Save Changes
+                    {isSaving ? 'Saving…' : 'Save Changes'}
                   </button>
                 </div>
               )}
@@ -241,26 +302,129 @@ export default function Profile() {
 
             {/* Analysis History */}
             <div className="p-8 rounded-2xl bg-muted/10 border border-border glass-card relative">
-              <h2 className="text-xl font-display font-medium text-foreground mb-6 flex items-center gap-3">
-                <span className="w-8 h-8 rounded-lg bg-blue-500/20 text-blue-400 flex items-center justify-center text-sm">02</span>
-                Analysis History
+              <h2 className="text-xl font-display font-medium text-foreground mb-6 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <span className="w-8 h-8 rounded-lg bg-blue-500/20 text-blue-400 flex items-center justify-center text-sm">02</span>
+                  Analysis History
+                </div>
+                {history.length > 0 && (
+                  <div className="flex items-center gap-4 text-sm font-normal">
+                    <span className="text-muted-foreground mr-2">Showing {history.length} analysis records</span>
+                    <div className="relative group">
+                      <select 
+                        value={sortParam} 
+                        onChange={(e) => handleSort(e.target.value)}
+                        className="appearance-none bg-background border border-border rounded-md pl-3 pr-8 py-1.5 text-xs focus:ring-1 focus:ring-primary/50 outline-none"
+                      >
+                        <option value="newest">Newest First</option>
+                        <option value="oldest">Oldest First</option>
+                        <option value="highest_risk">Highest Risk First</option>
+                        <option value="lowest_score">Lowest Score First</option>
+                      </select>
+                      <ChevronDown size={14} className="absolute right-2 top-2 pointer-events-none text-muted-foreground" />
+                    </div>
+                  </div>
+                )}
               </h2>
 
-              <div className="flex flex-col items-center justify-center py-12 text-center border border-dashed border-border rounded-xl bg-background/50">
-                <div className="w-12 h-12 rounded-full bg-muted/30 flex items-center justify-center mb-4 text-muted-foreground">
-                  <Shield size={20} />
+              {history.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center border border-dashed border-border rounded-xl bg-background/50">
+                  <div className="w-12 h-12 rounded-full bg-muted/30 flex items-center justify-center mb-4 text-muted-foreground">
+                    <Shield size={20} />
+                  </div>
+                  <h3 className="text-foreground font-medium mb-2">No analyses yet</h3>
+                  <p className="text-sm text-muted-foreground max-w-sm mb-6">
+                    You haven't run any fairness audits or document checks yet. Head to the dashboard to get started.
+                  </p>
+                  <button 
+                    onClick={() => window.location.href = '/dashboard'}
+                    className="px-6 py-2 rounded-full border border-primary/50 text-primary hover:bg-primary/10 transition-colors text-sm font-medium"
+                  >
+                    Go to Dashboard
+                  </button>
                 </div>
-                <h3 className="text-foreground font-medium mb-2">No analyses yet</h3>
-                <p className="text-sm text-muted-foreground max-w-sm mb-6">
-                  You haven't run any fairness audits or document checks yet. Head to the dashboard to get started.
-                </p>
-                <button 
-                  onClick={() => window.location.href = '/dashboard'}
-                  className="px-6 py-2 rounded-full border border-primary/50 text-primary hover:bg-primary/10 transition-colors text-sm font-medium"
-                >
-                  Go to Dashboard
-                </button>
-              </div>
+              ) : (
+                <div className="space-y-4">
+                  {history.map((record) => (
+                    <div key={record.id} className="p-5 bg-background border border-border/80 hover:border-primary/50 transition-colors rounded-xl flex flex-col md:flex-row gap-4 justify-between items-start md:items-center group">
+                      
+                      {/* Left section info */}
+                      <div className="flex items-start gap-4">
+                        <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center text-xl shrink-0">
+                          {record.analysisType === 'Document Analysis' ? '📄' : '📊'}
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-white mb-1">{record.fileName}</h4>
+                          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground font-medium mb-2">
+                            <span className="px-2 py-0.5 rounded-full bg-muted/50 border border-border">{record.analysisType === 'Document Analysis' ? 'Document' : 'Dataset'}</span>
+                            <span>•</span>
+                            <span className="flex items-center gap-1"><Calendar size={12}/> {formatRelativeTime(record.timestamp)}</span>
+                          </div>
+                          <div className="flex items-center gap-4 text-xs font-medium">
+                            <span className="flex items-center gap-1">
+                              {record.status === 'Completed' ? <span className="text-green-400">✅ Completed</span> : <span className="text-red-400">❌ Failed</span>}
+                            </span>
+                            <span className="text-muted-foreground">
+                              {record.totalIssuesFound} issues ({record.criticalIssues} critical)
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Right section badges & actions */}
+                      <div className="flex flex-col md:flex-row items-start md:items-center gap-6 w-full md:w-auto">
+                        
+                        <div className="flex items-center gap-4 border-t md:border-t-0 md:border-l border-border/50 pt-3 md:pt-0 pl-0 md:pl-4 w-full md:w-auto">
+                          <div className="flex flex-col items-center">
+                            <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs mb-1 ${
+                               record.overallFairnessScore >= 80 ? 'bg-green-500/20 text-green-400' :
+                               record.overallFairnessScore >= 60 ? 'bg-yellow-500/20 text-yellow-400' :
+                               record.overallFairnessScore >= 40 ? 'bg-orange-500/20 text-orange-400' :
+                               'bg-red-500/20 text-red-400'
+                            }`}>
+                              {record.overallFairnessScore?.toFixed(0)}
+                            </div>
+                            <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Score</span>
+                          </div>
+                          
+                          <div className="flex flex-col items-center min-w-[70px]">
+                            <span className={`text-xs font-bold mb-1 ${
+                               record.riskLevel === 'Low' ? 'text-green-400' :
+                               record.riskLevel === 'Medium' ? 'text-yellow-400' :
+                               record.riskLevel === 'High' ? 'text-orange-400' : 'text-red-400'
+                            }`}>
+                              {record.riskLevel}
+                            </span>
+                            <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Risk</span>
+                          </div>
+                        </div>
+
+                        <div className="flex md:flex-col gap-2 w-full md:w-auto mt-2 md:mt-0">
+                          <button 
+                            onClick={() => navigate('/dashboard', { state: { viewRecordId: record.id } })}
+                            className="flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-1.5 bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20 rounded-md text-xs font-medium transition"
+                          >
+                            <Eye size={14}/> View Results
+                          </button>
+                          <button 
+                            onClick={() => setDeleteCandidate(record.id)}
+                            className="flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-1.5 bg-red-500/5 hover:bg-red-500/10 text-red-400 border border-red-500/10 hover:border-red-500/20 rounded-md text-xs font-medium transition"
+                          >
+                            <Trash2 size={14}/> Delete
+                          </button>
+                        </div>
+                      </div>
+
+                    </div>
+                  ))}
+                  
+                  {history.length > 10 && (
+                     <div className="text-center pt-2">
+                       <button className="text-xs text-muted-foreground hover:text-foreground">Load More...</button>
+                     </div>
+                  )}
+                </div>
+              )}
             </div>
           </motion.div>
 
@@ -311,6 +475,44 @@ export default function Profile() {
 
         </div>
       </main>
+
+      {/* Delete Confirmation Modal */}
+      <AnimatePresence>
+        {deleteCandidate && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center px-4 bg-black/60 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="bg-background border border-border/80 w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden glass-card"
+            >
+              <div className="p-6">
+                <div className="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center mb-4 mx-auto text-red-500">
+                  <AlertTriangle size={24} />
+                </div>
+                <h3 className="text-lg font-bold text-center text-white mb-2">Delete Analysis Record?</h3>
+                <p className="text-sm text-muted-foreground text-center mb-6">
+                  Are you sure you want to delete this analysis record? This cannot be undone.
+                </p>
+                <div className="flex gap-3">
+                  <button 
+                    onClick={() => setDeleteCandidate(null)}
+                    className="flex-1 px-4 py-2 bg-muted/50 hover:bg-muted text-foreground rounded-lg text-sm font-medium transition"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    onClick={confirmDelete}
+                    className="flex-1 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg text-sm font-medium transition"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
