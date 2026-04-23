@@ -22,9 +22,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy backend source into /app (main.py lands at /app/main.py)
 COPY backend/ .
 
-# Make startup script executable
-RUN chmod +x /app/start.sh
-
 EXPOSE 8000
 
-CMD ["/bin/sh", "/app/start.sh"]
+# Use Python entrypoint (avoids CRLF shell script issues on Linux)
+CMD ["python", "/app/run.py"]
