@@ -11,15 +11,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     liblapack-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy and install Python dependencies
+# Upgrade pip/setuptools
+RUN pip install --upgrade pip setuptools wheel
+
+# Install uvicorn FIRST in its own step to guarantee it's available
+RUN pip install uvicorn==0.29.0
+
+# Install remaining dependencies
 COPY requirements.txt .
-RUN pip install --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
 
-# Expose port (Render/Fly.io inject $PORT at runtime)
 EXPOSE 8000
 
+# Use exec form with sh to expand $PORT env variable injected by Render
 CMD ["sh", "-c", "python -m uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
