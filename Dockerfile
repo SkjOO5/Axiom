@@ -2,27 +2,23 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system build tools for scipy/fairlearn (BLAS, Fortran compiler)
+# Install system build tools for scipy/fairlearn
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    g++ \
-    gfortran \
-    libopenblas-dev \
-    liblapack-dev \
+    gcc g++ gfortran libopenblas-dev liblapack-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip and install uvicorn (guaranteed present)
+# Install pip tools + uvicorn
 RUN pip install --upgrade pip setuptools wheel && \
     pip install uvicorn==0.29.0
 
-# Install Python dependencies
+# Install dependencies
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy backend source into /app (main.py lands at /app/main.py)
+# Copy backend code
 COPY backend/ .
 
-EXPOSE 8000
+# HuggingFace Spaces uses port 7860
+EXPOSE 7860
 
-# Use Python entrypoint (avoids CRLF shell script issues on Linux)
-CMD ["python", "/app/run.py"]
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
