@@ -55,7 +55,7 @@ AI systems now make critical decisions about hiring, loans, healthcare, and educ
 | Backend | Python 3.9+, FastAPI, Pandas, Scikit-Learn |
 | AI | Google Gemini 2.5 Flash |
 | Auth | Local auth (JWT tokens) + optional Supabase |
-| Deployment | Vercel (frontend) + Railway/Render (backend) |
+| Deployment | Vercel (frontend) + Hugging Face Spaces (backend) |
 
 ## 🏗️ Architecture
 
@@ -69,7 +69,7 @@ Axiom/
 │   │   └── contexts/   # AuthContext
 │   └── dist/           # Production build output
 │
-├── backend/           # FastAPI (deploys to Railway/Render)
+├── backend/           # FastAPI (deploys to Hugging Face Spaces)
 │   ├── main.py         # All API endpoints
 │   ├── bias_detector.py
 │   ├── bias_mitigator.py
