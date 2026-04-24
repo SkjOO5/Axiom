@@ -193,6 +193,19 @@ try:
 except Exception as e:
     print(f"[WARN] chat routes import failed: {e}")
 
+from fastapi.responses import RedirectResponse
+
+@app.get("/")
+async def root():
+    """Redirect root to API documentation (fixes Hugging Face 404)"""
+    return RedirectResponse(url="/docs")
+
+@app.get("/api/health")
+async def health():
+    """Simple health check endpoint"""
+    return {"status": "healthy", "service": "Axiom API"}
+
+
 
 
 @app.middleware("http")
