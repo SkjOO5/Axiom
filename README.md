@@ -10,8 +10,7 @@
 
 <br />
 
-> 🚀 **Live Demo**: [https://axiom-YOUR_DEPLOY_ID.vercel.app](https://axiom-YOUR_DEPLOY_ID.vercel.app)  
-> *(Replace with your actual Vercel URL after deployment)*
+> 🚀 **Live Demo**: [https://axiomdashboard.vercel.app/](https://axiomdashboard.vercel.app/)  
 
 **AXiOM** is a professional-grade platform to inspect AI datasets and documents for hidden unfairness, algorithmic bias, representation issues, and discrimination risks. It empowers organizations to measure, flag, explain, and mitigate harmful bias before algorithmic systems affect real people.
 
@@ -139,17 +138,20 @@ vercel --prod
 
 Add in Vercel Dashboard → Settings → Environment Variables:
 ```
-VITE_API_BASE_URL = https://your-backend.railway.app
+VITE_API_BASE_URL = https://electron005-axiom.hf.space
 ```
 
-### Backend → Railway (free tier)
+### Backend → Hugging Face Spaces (Free Tier)
 
-Connect your GitHub repo to Railway, set the start command to:
-```
-uvicorn main:app --host 0.0.0.0 --port $PORT
-```
+We use Hugging Face Spaces because it natively supports heavy ML dependencies (`scipy`, `fairlearn`, `sklearn`) via Docker.
 
-Add these env variables in Railway dashboard:
+1. Create a New Space on Hugging Face using the **Docker** SDK.
+2. Link your local repo to the Space:
+```bash
+git remote add hf https://huggingface.co/spaces/YOUR_USERNAME/axiom
+git push hf main
+```
+3. Add these Secret Environment Variables in the Hugging Face Space settings:
 ```
 GEMINI_API_KEY = your_key
 SUPABASE_URL = your_url      # optional
